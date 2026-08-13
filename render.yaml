@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: hodan-skin-clinic-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FIREBASE_PROJECT_ID
+        sync: false
+      - key: FIREBASE_CLIENT_EMAIL
+        sync: false
+      - key: FIREBASE_PRIVATE_KEY
+        sync: false
+      - key: TELESOM_USERNAME
+        sync: false
+      - key: TELESOM_PASSWORD
+        sync: false
+      - key: TELESOM_SENDER_ID
+        value: HodanClinic
+      - key: TELESOM_CLIENT_REF
+        value: TLS-238
+      - key: WAAFI_API_KEY
+        sync: false
+      - key: WAAFI_MERCHANT_ID
+        sync: false
+      - key: WAAFI_ACCOUNT_ID
+        sync: false
