@@ -1,0 +1,404 @@
+const express = require('express');
+const cors = require('cors');
+const axios = require('axios');
+const crypto = require('crypto');
+
+const app = express();
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
+app.use(express.json());
+
+const TELESOM_CONFIG = {
+  senderID: process.env.TELESOM_SENDER_ID,
+  username: process.env.TELESOM_USERNAME,
+  password: process.env.TELESOM_PASSWORD,
+  clientRef: process.env.TELESOM_CLIENT_REF,
+  baseUrl: process.env.TELESOM_BASE_URL || 'https://sms.mytelesom.com/'
+};
+
+const WAAFI_CONFIG = {
+  merchantUid: process.env.WAAFI_MERCHANT_UID,
+  apiUserId: process.env.WAAFI_API_USER_ID,
+  apiKey: process.env.WAAFI_API_KEY,
+  baseUrl: process.env.WAAFI_BASE_URL || 'https://api.waafipay.net'
+};
+
+const FIREBASE_WEB_API_KEY = process.env.FIREBASE_WEB_API_KEY;
+
+const otpStore = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [phone, data] of otpStore.entries()) {
+    if (now > data.expiresAt) otpStore.delete(phone);
+  }
+}, 10 * 60 * 1000);
+
+let lastSmsAttempt = null;
+
+function getCredentials(phone) {
+  const clean = phone.replace(/\D/g, '');
+  return { email: `user_${clean}@hodanclinic.com`, password: `HodanClinic_${clean}_Secure2024!`, cleanPhone: clean };
+}
+
+function generateOtp() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function generateTelesomHashKey(username, password, to, msg, fromId, date, secretKey) {
+  const encodedMsg = msg.replace(/ /g, '%20');
+  const hashString = `${username}|${password}|${to}|${encodedMsg}|${fromId}|${date}|${secretKey}`;
+  return crypto.createHash('md5').update(hashString).digest('hex').toUpperCase();
+}
+
+function getTodayDate() {
+  const now = new Date();
+  const day = String(now.getDate()).padStart(2, '0');
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const year = now.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+async function firebaseAuthRequest(endpoint, body) {
+  const url = `https://identitytoolkit.googleapis.com/v1/accounts:${endpoint}?key=${FIREBASE_WEB_API_KEY}`;
+  try {
+    const res = await axios.post(url, body, { timeout: 15000, headers: { 'Content-Type': 'application/json' } });
+    return { success: true, data: res.data };
+  } catch (err) {
+    return { success: false, error: err.response?.data?.error?.message || err.message };
+  }
+}
+
+async function trySendTelesomMethod(baseUrl, method, phone, message) {
+  const cleanPhone = phone.replace(/\D/g, '');
+  const today = getTodayDate();
+  const results = [];
+
+  // Try 1: POST index.php/Gway/sendsms/ with hash
+  try {
+    const url = `${baseUrl}/index.php/Gway/sendsms/`;
+    const encodedMsg = message.replace(/ /g, '%20');
+    const hashKey = generateTelesomHashKey(
+      TELESOM_CONFIG.username,
+      TELESOM_CONFIG.password,
+      cleanPhone,
+      encodedMsg,
+      TELESOM_CONFIG.senderID,
+      today,
+      TELESOM_CONFIG.clientRef || ''
+    );
+
+    const params = new URLSearchParams();
+    params.append('username', TELESOM_CONFIG.username);
+    params.append('password', TELESOM_CONFIG.password);
+    params.append('to', cleanPhone);
+    params.append('msg', encodedMsg);
+    params.append('from', TELESOM_CONFIG.senderID);
+    params.append('date', today);
+    params.append('key', hashKey);
+
+    const res = await axios.post(url, params.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 15000
+    });
+
+    results.push({ method: 'POST_hash_indexphp', url, success: true, status: res.status, data: res.data });
+    return { success: true, method: 'POST_hash_indexphp', data: res.data };
+  } catch (err) {
+    results.push({ method: 'POST_hash_indexphp', url: `${baseUrl}/index.php/Gway/sendsms/`, success: false, error: err.message, response: err.response?.data, status: err.response?.status });
+  }
+
+  // Try 2: POST /Gway/sendsms/ (no index.php)
+  try {
+    const url = `${baseUrl}/Gway/sendsms/`;
+    const encodedMsg = message.replace(/ /g, '%20');
+    const hashKey = generateTelesomHashKey(
+      TELESOM_CONFIG.username,
+      TELESOM_CONFIG.password,
+      cleanPhone,
+      encodedMsg,
+      TELESOM_CONFIG.senderID,
+      today,
+      TELESOM_CONFIG.clientRef || ''
+    );
+
+    const params = new URLSearchParams();
+    params.append('username', TELESOM_CONFIG.username);
+    params.append('password', TELESOM_CONFIG.password);
+    params.append('to', cleanPhone);
+    params.append('msg', encodedMsg);
+    params.append('from', TELESOM_CONFIG.senderID);
+    params.append('date', today);
+    params.append('key', hashKey);
+
+    const res = await axios.post(url, params.toString(), {
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      timeout: 15000
+    });
+
+    results.push({ method: 'POST_hash_Gway', url, success: true, status: res.status, data: res.data });
+    return { success: true, method: 'POST_hash_Gway', data: res.data };
+  } catch (err) {
+    results.push({ method: 'POST_hash_Gway', url: `${baseUrl}/Gway/sendsms/`, success: false, error: err.message, response: err.response?.data, status: err.response?.status });
+  }
+
+  // Try 3: GET with query params (simple)
+  try {
+    const msg = encodeURIComponent(message);
+    const url = `${baseUrl}/send?senderID=${encodeURIComponent(TELESOM_CONFIG.senderID)}&recipient=${encodeURIComponent(cleanPhone)}&message=${msg}&username=${encodeURIComponent(TELESOM_CONFIG.username)}&password=${encodeURIComponent(TELESOM_CONFIG.password)}`;
+
+    const res = await axios.get(url, { timeout: 15000 });
+    results.push({ method: 'GET_simple', url, success: true, status: res.status, data: res.data });
+    return { success: true, method: 'GET_simple', data: res.data };
+  } catch (err) {
+    results.push({ method: 'GET_simple', url: `${baseUrl}/send?...`, success: false, error: err.message, response: err.response?.data, status: err.response?.status });
+  }
+
+  // Try 4: POST /send with JSON
+  try {
+    const url = `${baseUrl}/send`;
+    const res = await axios.post(url, {
+      senderID: TELESOM_CONFIG.senderID,
+      recipient: cleanPhone,
+      message: message,
+      username: TELESOM_CONFIG.username,
+      password: TELESOM_CONFIG.password
+    }, { headers: { 'Content-Type': 'application/json' }, timeout: 15000 });
+
+    results.push({ method: 'POST_json', url, success: true, status: res.status, data: res.data });
+    return { success: true, method: 'POST_json', data: res.data };
+  } catch (err) {
+    results.push({ method: 'POST_json', url: `${baseUrl}/send`, success: false, error: err.message, response: err.response?.data, status: err.response?.status });
+  }
+
+  // Try 5: POST /api/sendsms
+  try {
+    const url = `${baseUrl}/api/sendsms`;
+    const res = await axios.post(url, {
+      senderID: TELESOM_CONFIG.senderID,
+      recipient: cleanPhone,
+      message: message,
+      username: TELESOM_CONFIG.username,
+      password: TELESOM_CONFIG.password
+    }, { headers: { 'Content-Type': 'application/json' }, timeout: 15000 });
+
+    results.push({ method: 'POST_api', url, success: true, status: res.status, data: res.data });
+    return { success: true, method: 'POST_api', data: res.data };
+  } catch (err) {
+    results.push({ method: 'POST_api', url: `${baseUrl}/api/sendsms`, success: false, error: err.message, response: err.response?.data, status: err.response?.status });
+  }
+
+  // Try 6: GET /index.php/Gway/sendsms/ with hash
+  try {
+    const url = `${baseUrl}/index.php/Gway/sendsms/`;
+    const encodedMsg = message.replace(/ /g, '%20');
+    const hashKey = generateTelesomHashKey(
+      TELESOM_CONFIG.username,
+      TELESOM_CONFIG.password,
+      cleanPhone,
+      encodedMsg,
+      TELESOM_CONFIG.senderID,
+      today,
+      TELESOM_CONFIG.clientRef || ''
+    );
+
+    const res = await axios.get(url, {
+      params: {
+        username: TELESOM_CONFIG.username,
+        password: TELESOM_CONFIG.password,
+        to: cleanPhone,
+        msg: encodedMsg,
+        from: TELESOM_CONFIG.senderID,
+        date: today,
+        key: hashKey
+      },
+      timeout: 15000
+    });
+
+    results.push({ method: 'GET_hash', url, success: true, status: res.status, data: res.data });
+    return { success: true, method: 'GET_hash', data: res.data };
+  } catch (err) {
+    results.push({ method: 'GET_hash', url: `${baseUrl}/index.php/Gway/sendsms/`, success: false, error: err.message, response: err.response?.data, status: err.response?.status });
+  }
+
+  return { success: false, error: 'All methods failed', results };
+}
+
+async function sendTelesomSMS(phone, message) {
+  console.log('[SMS] Starting sendTelesomSMS to:', phone);
+
+  if (!TELESOM_CONFIG.senderID || !TELESOM_CONFIG.username || !TELESOM_CONFIG.password) {
+    console.log('[SMS] ERROR: Telesom not configured');
+    return { success: false, error: 'Telesom not configured' };
+  }
+
+  const baseUrl = TELESOM_CONFIG.baseUrl.replace(/\/$/, '');
+  const cleanPhone = phone.replace(/\D/g, '');
+
+  console.log('[SMS] Config baseUrl:', baseUrl);
+
+  // Try with configured baseUrl
+  let result = await trySendTelesomMethod(baseUrl, 'configured', phone, message);
+  if (result.success) {
+    lastSmsAttempt = { phone: cleanPhone, success: true, method: result.method, time: new Date().toISOString() };
+    return result;
+  }
+
+  // Fallback: try sms.mytelesom.com if configured was different
+  if (baseUrl !== 'https://sms.mytelesom.com') {
+    console.log('[SMS] Trying fallback baseUrl: https://sms.mytelesom.com');
+    const fallbackResult = await trySendTelesomMethod('https://sms.mytelesom.com', 'fallback', phone, message);
+    if (fallbackResult.success) {
+      lastSmsAttempt = { phone: cleanPhone, success: true, method: fallbackResult.method, time: new Date().toISOString() };
+      return fallbackResult;
+    }
+    result.fallback = fallbackResult;
+  }
+
+  lastSmsAttempt = { phone: cleanPhone, success: false, error: result.error, results: result.results || result.fallback?.results, time: new Date().toISOString() };
+  return { success: false, error: result.error, details: result.results || result.fallback?.results };
+}
+
+async function initiateWaafiPayment(phone, amount, description) {
+  if (!WAAFI_CONFIG.merchantUid || !WAAFI_CONFIG.apiKey) {
+    return { success: false, error: 'WAAFI not configured' };
+  }
+  try {
+    const res = await axios.post(`${WAAFI_CONFIG.baseUrl}/api/payment`, {
+      merchantUid: WAAFI_CONFIG.merchantUid, apiUserId: WAAFI_CONFIG.apiUserId,
+      apiKey: WAAFI_CONFIG.apiKey, phone, amount, description
+    }, { timeout: 15000 });
+    return { success: true, data: res.data };
+  } catch (err) {
+    return { success: false, error: err.message, details: err.response?.data };
+  }
+}
+
+app.get('/health', (req, res) => {
+  res.json({ healthy: true, firebase: !!FIREBASE_WEB_API_KEY, timestamp: new Date().toISOString() });
+});
+
+app.get('/debug', (req, res) => {
+  res.json({
+    telesom_url: TELESOM_CONFIG.baseUrl,
+    telesom_sender_set: !!TELESOM_CONFIG.senderID,
+    telesom_username_set: !!TELESOM_CONFIG.username,
+    telesom_password_set: !!TELESOM_CONFIG.password,
+    telesom_client_ref_set: !!TELESOM_CONFIG.clientRef,
+    waafi_merchant_set: !!WAAFI_CONFIG.merchantUid,
+    firebase_web_api_key_set: !!FIREBASE_WEB_API_KEY,
+    otp_store_size: otpStore.size,
+    today_date: getTodayDate(),
+    last_sms_attempt: lastSmsAttempt
+  });
+});
+
+// NEW: Browser test endpoint - returns full results
+app.get('/test-sms', async (req, res) => {
+  const phone = req.query.phone;
+  if (!phone) {
+    return res.status(400).json({ error: 'Add ?phone=252xxxxxxxxx to the URL' });
+  }
+  const result = await sendTelesomSMS(phone, 'Test OTP: 123456 from Hodan Skin Clinic');
+  res.json(result);
+});
+
+app.post('/api/send-otp', async (req, res) => {
+  console.log('[OTP] Received request:', req.body);
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ success: false, error: 'Phone number is required' });
+    const cleanPhone = phone.replace(/\D/g, '');
+    const otp = generateOtp();
+    const expiresAt = Date.now() + 5 * 60 * 1000;
+    otpStore.set(cleanPhone, { code: otp, expiresAt, attempts: 0 });
+
+    console.log('[OTP] Generated OTP:', otp, 'for phone:', cleanPhone);
+
+    const smsResult = await sendTelesomSMS(cleanPhone, `Your Hodan Skin Clinic OTP is: ${otp}. Valid for 5 minutes.`);
+
+    console.log('[OTP] SMS result:', smsResult);
+
+    if (!smsResult.success) {
+      // CRITICAL FIX: Return failure so frontend shows error
+      return res.status(502).json({
+        success: false,
+        error: 'SMS failed to send',
+        smsError: smsResult.error,
+        smsDetails: smsResult.details || null
+      });
+    }
+
+    res.json({ success: true, message: 'OTP sent', smsDelivered: true });
+  } catch (err) {
+    console.log('[OTP] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/verify-otp', async (req, res) => {
+  try {
+    const { phone, code } = req.body;
+    if (!phone || !code) return res.status(400).json({ success: false, error: 'Phone and OTP code required' });
+    const cleanPhone = phone.replace(/\D/g, '');
+    const stored = otpStore.get(cleanPhone);
+    if (!stored) return res.status(400).json({ success: false, error: 'OTP not found or expired' });
+    if (Date.now() > stored.expiresAt) { otpStore.delete(cleanPhone); return res.status(400).json({ success: false, error: 'OTP expired' }); }
+    if (stored.code !== code) {
+      stored.attempts++;
+      if (stored.attempts >= 3) { otpStore.delete(cleanPhone); return res.status(400).json({ success: false, error: 'Too many failed attempts. Request a new OTP.' }); }
+      return res.status(400).json({ success: false, error: 'Invalid OTP' });
+    }
+    otpStore.delete(cleanPhone);
+    res.json({ success: true, message: 'OTP verified', phone: cleanPhone });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/register', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ success: false, error: 'Phone number is required' });
+    const { email, password, cleanPhone } = getCredentials(phone);
+    let result = await firebaseAuthRequest('signUp', { email, password, returnSecureToken: true });
+    if (!result.success && result.error === 'EMAIL_EXISTS') {
+      result = await firebaseAuthRequest('signInWithPassword', { email, password, returnSecureToken: true });
+    }
+    if (!result.success) return res.status(400).json({ success: false, error: result.error });
+    res.json({ success: true, uid: result.data.localId, email: result.data.email, idToken: result.data.idToken, refreshToken: result.data.refreshToken, expiresIn: result.data.expiresIn, phone: cleanPhone });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/login', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) return res.status(400).json({ success: false, error: 'Phone number is required' });
+    const { email, password, cleanPhone } = getCredentials(phone);
+    const result = await firebaseAuthRequest('signInWithPassword', { email, password, returnSecureToken: true });
+    if (!result.success) return res.status(400).json({ success: false, error: result.error });
+    res.json({ success: true, uid: result.data.localId, email: result.data.email, idToken: result.data.idToken, refreshToken: result.data.refreshToken, expiresIn: result.data.expiresIn, phone: cleanPhone });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/user/:uid', async (req, res) => {
+  res.json({ success: true, uid: req.params.uid, message: 'User data available via client-side auth' });
+});
+
+app.post('/api/payment', async (req, res) => {
+  try {
+    const { phone, amount, description } = req.body;
+    if (!phone || !amount) return res.status(400).json({ success: false, error: 'Phone and amount required' });
+    const result = await initiateWaafiPayment(phone, amount, description);
+    res.json({ success: result.success, message: result.success ? 'Payment initiated' : 'Payment failed', error: result.error || null, waafiResponse: result.data || null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Hodan Skin Clinic API running on port ${PORT}`);
+});
