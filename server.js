@@ -67,7 +67,7 @@ async function firebaseAuthRequest(endpoint, body) {
   }
 }
 
-async function trySendTelesomMethod(baseUrl, method, phone, message) {
+async function trySendTelesomMethod(baseUrl, phone, message) {
   const cleanPhone = phone.replace(/\D/g, '');
   const today = getTodayDate();
   const results = [];
@@ -236,7 +236,7 @@ async function sendTelesomSMS(phone, message) {
   console.log('[SMS] Config baseUrl:', baseUrl);
 
   // Try with configured baseUrl
-  let result = await trySendTelesomMethod(baseUrl, 'configured', phone, message);
+  let result = await trySendTelesomMethod(baseUrl, phone, message);
   if (result.success) {
     lastSmsAttempt = { phone: cleanPhone, success: true, method: result.method, time: new Date().toISOString() };
     return result;
@@ -245,7 +245,7 @@ async function sendTelesomSMS(phone, message) {
   // Fallback: try sms.mytelesom.com if configured was different
   if (baseUrl !== 'https://sms.mytelesom.com') {
     console.log('[SMS] Trying fallback baseUrl: https://sms.mytelesom.com');
-    const fallbackResult = await trySendTelesomMethod('https://sms.mytelesom.com', 'fallback', phone, message);
+    const fallbackResult = await trySendTelesomMethod('https://sms.mytelesom.com', phone, message);
     if (fallbackResult.success) {
       lastSmsAttempt = { phone: cleanPhone, success: true, method: fallbackResult.method, time: new Date().toISOString() };
       return fallbackResult;
@@ -402,3 +402,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Hodan Skin Clinic API running on port ${PORT}`);
 });
+    
